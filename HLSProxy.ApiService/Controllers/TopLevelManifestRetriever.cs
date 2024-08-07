@@ -1,7 +1,4 @@
-﻿using System.Globalization;
-using System.Net;
-using System.Net.Cache;
-using System.Text.RegularExpressions;
+﻿using System.Text.RegularExpressions;
 using System.Web;
 
 namespace HLSProxy.ApiService.Controllers;
@@ -11,44 +8,75 @@ namespace HLSProxy.ApiService.Controllers;
 /// </summary>
 public class TopLevelManifestRetriever : ITopLevelManifestRetriever
 {
-    public string GetTopLevelManifestForToken(string manifestProxyUrl, string topLeveLManifestUrl, string token)
+    private readonly ILogger<TopLevelManifestRetriever> logger;
+
+    public TopLevelManifestRetriever(ILogger<TopLevelManifestRetriever> logger)
     {
-        var httpRequest = (HttpWebRequest)WebRequest.Create(new Uri(topLeveLManifestUrl));
-        httpRequest.CachePolicy = new HttpRequestCachePolicy(HttpRequestCacheLevel.NoCacheNoStore);
-        httpRequest.Timeout = 30000;
-        var httpResponse = httpRequest.GetResponse();
+        this.logger = logger;
+    }
+
+    /// <summary>
+    /// Retrieves the top-level manifest for a given token and modifies it to include the token.
+    /// </summary>
+    /// <param name="manifestProxyUrl">The URL of the manifest proxy.</param>
+    /// <param name="topLeveLManifestUrl">The URL of the top-level manifest.</param>
+    /// <param name="token">The token to be included in the manifest.</param>
+    /// <returns>The modified top-level manifest content.</returns>
+    public async Task<string> GetTopLevelManifestForTokenAsync(string manifestProxyUrl, string topLeveLManifestUrl, string token)
+    {
+        logger.LogInformation("GetTopLevelManifestForTokenAsync called with manifestProxyUrl: {ManifestProxyUrl}, topLeveLManifestUrl: {TopLeveLManifestUrl}, token: {Token}", manifestProxyUrl, topLeveLManifestUrl, token);
+
+        using var httpClient = new HttpClient();
+        httpClient.DefaultRequestHeaders.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue
+        {
+            NoCache = true,
+            NoStore = true
+        };
+        httpClient.Timeout = TimeSpan.FromMilliseconds(30000);
 
         try
         {
-            var stream = httpResponse.GetResponseStream();
-            if (stream != null)
+            var httpResponse = await httpClient.GetAsync(topLeveLManifestUrl);
+            logger.LogInformation("HTTP request to {TopLeveLManifestUrl} completed with status code {StatusCode}", topLeveLManifestUrl, httpResponse.StatusCode);
+
+            if (httpResponse.IsSuccessStatusCode)
             {
-                using (var reader = new StreamReader(stream))
-                {
-                    const string qualityLevelRegex = @"(QualityLevels\(\d+\)/Manifest\(.+\))";
+                var topLevelManifestContent = await httpResponse.Content.ReadAsStringAsync();
+                logger.LogInformation("Top-level manifest content retrieved successfully");
 
-                    var toplevelmanifestcontent = reader.ReadToEnd();
+                var uri = new Uri(topLeveLManifestUrl);
+                var pathWithoutQuery = uri.AbsolutePath[..uri.AbsolutePath.LastIndexOf('/')];
+                var topLevelManifestBaseUrl = $"{uri.Scheme}://{uri.Host}{pathWithoutQuery}/manifest.msi";
+                var urlEncodedTopLeveLManifestBaseUrl = HttpUtility.UrlEncode(topLevelManifestBaseUrl);
+                var urlEncodedToken = HttpUtility.UrlEncode(token);
 
-                    var topLevelManifestBaseUrl = topLeveLManifestUrl.Substring(0, topLeveLManifestUrl.IndexOf(".ism", StringComparison.OrdinalIgnoreCase)) + ".ism";
-                    var urlEncodedTopLeveLManifestBaseUrl = HttpUtility.UrlEncode(topLevelManifestBaseUrl);
-                    var urlEncodedToken = HttpUtility.UrlEncode(token);
+                const string uriRegex = @"(URI=""[^""]+"")";
+                var newContent = Regex.Replace(topLevelManifestContent,
+                    uriRegex,
+                    match =>
+                    {
+                        // Retrieves the original URI from the matched string without the "URI=" part and the quotes at the end.
+                        var originalUri = match.Value.Substring(5, match.Value.Length - 6);
+                        var encodedUri = HttpUtility.UrlEncode(originalUri);
+                        return $"URI=\"{manifestProxyUrl}?playbackUrl={urlEncodedTopLeveLManifestBaseUrl}/{encodedUri}&token={urlEncodedToken}\"";
+                    });
 
-                    var newContent = Regex.Replace(toplevelmanifestcontent,
-                        qualityLevelRegex,
-                        string.Format(CultureInfo.InvariantCulture,
-                            "{0}?playbackUrl={1}/$1&token={2}",
-                            manifestProxyUrl,
-                            urlEncodedTopLeveLManifestBaseUrl,
-                            urlEncodedToken));
+                logger.LogInformation("NewContent: {NewContent}", newContent); //TODO: Remove this line after testing
 
-                    return newContent;
-                }
+                logger.LogInformation("Top-level manifest content modified successfully");
+                return newContent;
+            }
+            else
+            {
+                logger.LogWarning("Failed to retrieve top-level manifest content. Status code: {StatusCode}", httpResponse.StatusCode);
             }
         }
-        finally
+        catch (Exception ex)
         {
-            httpResponse.Close();
+            logger.LogError(ex, "Error occurred while retrieving or modifying the top-level manifest");
+            throw;
         }
+
         return null;
     }
 }

@@ -2,5 +2,5 @@
 
 public interface ITopLevelManifestRetriever
 {
-    string GetTopLevelManifestForToken(string manifestProxyUrl, string topLeveLManifestUrl, string token);
+    Task<string> GetTopLevelManifestForTokenAsync(string manifestProxyUrl, string topLeveLManifestUrl, string token);
 }

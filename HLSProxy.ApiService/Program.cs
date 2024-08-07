@@ -1,7 +1,5 @@
 using HLSProxy.ApiService.Controllers;
 using Microsoft.AspNetCore.Mvc;
-using System.Net;
-using System.Net.Cache;
 using System.Web;
 
 internal class Program
@@ -39,49 +37,59 @@ internal class Program
             }
 
             var token = webtoken;
-            var modifiedTopLeveLManifest = topLevelManifestRetriever.GetTopLevelManifestForToken(GetManifestProxyUrl(request), playbackUrl, token);
+            var modifiedTopLeveLManifest = await Task.Run(() => topLevelManifestRetriever.GetTopLevelManifestForTokenAsync(GetManifestProxyUrl(request), playbackUrl, token));
             var response = new ContentResult
             {
                 Content = modifiedTopLeveLManifest,
                 ContentType = @"application/vnd.apple.mpegurl"
             };
-            request.HttpContext.Response.Headers.Add("Access-Control-Allow-Origin", "*");
-            request.HttpContext.Response.Headers.Add("X-Content-Type-Options", "nosniff");
-            request.HttpContext.Response.Headers.Add("Cache-Control", "max-age=259200");
+            request.HttpContext.Response.Headers.Append("Access-Control-Allow-Origin", "*");
+            request.HttpContext.Response.Headers.Append("X-Content-Type-Options", "nosniff");
+            request.HttpContext.Response.Headers.Append("Cache-Control", "max-age=259200");
 
             return Results.Content(response.Content, response.ContentType);
         });
 
         // Endpoint to proxy the manifest and inject a token
-        app.MapGet("/api/app/manifest/manifestproxy", async (string playbackUrl, string token, ITokenManifestInjector tokenManifestInjector) =>
+        app.MapGet("/api/app/manifest/manifestproxy", async (HttpRequest request, string playbackUrl, string token, ITokenManifestInjector tokenManifestInjector, ILogger<Program> logger) =>
         {
-            var collection = HttpUtility.ParseQueryString(token);
-            var authToken = collection[0];
-            var armouredAuthToken = HttpUtility.UrlEncode(authToken);
+            logger.LogInformation("GetProxy called with playbackUrl: {PlaybackUrl} and token: {Token}", playbackUrl, token);
 
-            var httpRequest = (HttpWebRequest)WebRequest.Create(new Uri(playbackUrl));
-            httpRequest.CachePolicy = new HttpRequestCachePolicy(HttpRequestCacheLevel.NoCacheNoStore);
-            httpRequest.Timeout = 30000;
-            var httpResponse = httpRequest.GetResponse();
-
-            var response = new ContentResult();
             try
             {
-                var stream = httpResponse.GetResponseStream();
-                if (stream != null)
+                var collection = HttpUtility.ParseQueryString(token);
+                var authToken = collection[0];
+                if (authToken == null)
                 {
-                    using (var reader = new StreamReader(stream))
-                    {
-                        var content = reader.ReadToEnd();
-                        response.Content = tokenManifestInjector.InjectTokenToManifestChunks(playbackUrl, armouredAuthToken, content);
-                    }
+                    return Results.BadRequest("Invalid token");
                 }
+                var armouredAuthToken = HttpUtility.UrlEncode(authToken);
+
+                using var httpClient = new HttpClient();
+                httpClient.DefaultRequestHeaders.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue
+                {
+                    NoCache = true,
+                    NoStore = true
+                };
+                httpClient.Timeout = TimeSpan.FromSeconds(30);
+
+                var httpResponse = await httpClient.GetAsync(playbackUrl);
+                httpResponse.EnsureSuccessStatusCode();
+
+                var response = new ContentResult();
+                var content = await httpResponse.Content.ReadAsStringAsync();
+                response.Content = tokenManifestInjector.InjectTokenToManifestChunks(playbackUrl, armouredAuthToken, content);
+
+                request.HttpContext.Response.Headers.Append("Access-Control-Allow-Origin", "*");
+
+                logger.LogInformation("Proxy manifest successfully retrieved and modified");
+                return Results.Content(response.Content, "application/vnd.apple.mpegurl");
             }
-            finally
+            catch (Exception ex)
             {
-                httpResponse.Close();
+                logger.LogError(ex, "Error occurred while retrieving or modifying the proxy manifest");
+                throw;
             }
-            return Results.Content(response.Content, "application/vnd.apple.mpegurl");
         });
 
         app.MapDefaultEndpoints();
